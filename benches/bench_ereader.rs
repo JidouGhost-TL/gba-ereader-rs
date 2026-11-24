@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use gba_ereader::dotcode::{bin_to_raw, build_bin, raw_to_bin};
-use gba_ereader::rs_ecc::{rs_correct, rs_encode_parity};
+use gba_ereader::rs_ecc::{rs_correct_inverted, rs_encode_parity_inverted};
 use gba_ereader::vpk0::{vpk0_compress, vpk0_decompress};
 
 fn bench(name: &str, iters: usize, bytes: usize, mut f: impl FnMut()) {
@@ -36,34 +36,43 @@ fn main() {
         black_box(vpk0_compress(black_box(&payload)).unwrap());
     });
 
-    let msg = [0xA5u8; 223];
-    let mut parity = [0u8; 32];
-    bench("RS encode (223+32)", 20000, 255, || {
-        rs_encode_parity(black_box(&msg), 32, &mut parity).unwrap();
+    let msg = [0xA5u8; 48];
+    let mut parity = [0u8; 16];
+    bench("RS(64,48) encode (GF 0x187, FCR=120)", 50000, 64, || {
+        rs_encode_parity_inverted(black_box(&msg), 16, &mut parity).unwrap();
         black_box(parity);
     });
-    let mut cw = [0u8; 255];
-    cw[..223].copy_from_slice(&msg);
-    rs_encode_parity(&msg, 32, &mut cw[223..]).unwrap();
-    bench("RS decode/correct clean (223+32)", 20000, 255, || {
+    let mut cw = [0u8; 64];
+    cw[..48].copy_from_slice(&msg);
+    rs_encode_parity_inverted(&msg, 16, &mut cw[48..]).unwrap();
+    bench("RS(64,48) decode clean", 50000, 64, || {
         let mut c = cw;
-        black_box(rs_correct(&mut c, 32).unwrap());
+        black_box(rs_correct_inverted(&mut c, 16).unwrap());
     });
     let mut damaged = cw;
-    for i in 0..16 {
-        damaged[i * 13] ^= 0xFF;
+    for i in 0..8 {
+        damaged[i * 7 + 1] ^= 0xFF;
     }
-    bench("RS decode/correct 16 errors (223+32)", 5000, 255, || {
+    bench("RS(64,48) decode 8 errors (max t=8)", 10000, 64, || {
         let mut c = damaged;
-        black_box(rs_correct(&mut c, 32).unwrap());
+        black_box(rs_correct_inverted(&mut c, 16).unwrap());
     });
 
-    let bin = build_bin(1, 0, 0, 1, payload.len() as u32, &payload[..400]);
-    let raw = bin_to_raw(&bin).unwrap();
-    bench("bin -> raw strip", 2000, bin.len(), || {
-        black_box(bin_to_raw(black_box(&bin)).unwrap());
+    let bin_s = build_bin(1, 0, 0, 1, &payload[..512]).unwrap();
+    let raw_s = bin_to_raw(&bin_s).unwrap();
+    bench("bin -> raw short strip (1872 B)", 2000, raw_s.len(), || {
+        black_box(bin_to_raw(black_box(&bin_s)).unwrap());
     });
-    bench("raw -> bin strip", 2000, bin.len(), || {
-        black_box(raw_to_bin(black_box(&raw)).unwrap());
+    bench("raw -> bin short strip (1872 B)", 2000, raw_s.len(), || {
+        black_box(raw_to_bin(black_box(&raw_s)).unwrap());
+    });
+
+    let bin_l = build_bin(1, 0, 0, 1, &payload[..1800]).unwrap();
+    let raw_l = bin_to_raw(&bin_l).unwrap();
+    bench("bin -> raw long strip (2912 B)", 2000, raw_l.len(), || {
+        black_box(bin_to_raw(black_box(&bin_l)).unwrap());
+    });
+    bench("raw -> bin long strip (2912 B)", 2000, raw_l.len(), || {
+        black_box(raw_to_bin(black_box(&raw_l)).unwrap());
     });
 }

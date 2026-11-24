@@ -1,5 +1,5 @@
 {
-  "description": "Byte-exact libmgba ARM7TDMI golden fixtures for gba-ereader vpk0. Streams are clean-room synthetic payloads compressed by the crate encoder; .bin outputs were captured from the real e-Reader (USA, PSAE) ROM vpk0 decoder FUN_03004d0c executed headless in libmgba.so.0.10 and verified byte-for-byte equal to the synthetic payloads. Size-query routine FUN_030051e0 also verified (804 for case1). No copyrighted card data.",
+  "description": "Byte-exact libmgba ARM7TDMI golden fixtures for gba-ereader (vpk0 + GF(256) 0x187 + ST Decoder Ver.1.10 for CARDe). All streams and strips are clean-room synthetic payloads; outputs were captured from the real e-Reader (USA, PSAE) ROM executed headless in libmgba.so.0.10. No copyrighted card data.",
   "rom": {
     "title": "e-Reader (USA)",
     "game_code": "PSAE",
@@ -7,7 +7,39 @@
     "size_query_arm_addr": "0x030051e0",
     "bit_reader_arm_addr": "0x03005400",
     "tree_builder_arm_addr": "0x03004a10",
-    "decode_loop_arm_addr": "0x03004ad4"
+    "decode_loop_arm_addr": "0x03004ad4",
+    "st_decoder_arm_addr": "0x08711ad0",
+    "gf256_init_arm_addr": "0x08712ea4",
+    "rs_syndrome_init_arm_addr": "0x08712f60",
+    "rs_decode_arm_addr": "0x08712fe0",
+    "card_header_parse_arm_addr": "0x08712768",
+    "demod_lut_iwram_addr": "0x03006214"
+  },
+  "st_decoder_cases": {
+    "gf256_0x187_arm": {
+      "file": "gf256_0x187_arm.bin",
+      "size": 512,
+      "poly": "0x187",
+      "fcr": 120
+    },
+    "strip_short": {
+      "file_clean_raw": "strip_short_clean.raw",
+      "file_corrupt_raw": "strip_short_corrupt.raw",
+      "file_arm_bin": "strip_short_arm.bin",
+      "raw_size": 1872,
+      "decoded_size": 1296,
+      "payload_size": 512,
+      "corruption": "4 DotCode header errors + 6 data errors"
+    },
+    "strip_long": {
+      "file_clean_raw": "strip_long_clean.raw",
+      "file_corrupt_raw": "strip_long_corrupt.raw",
+      "file_arm_bin": "strip_long_arm.bin",
+      "raw_size": 2912,
+      "decoded_size": 2064,
+      "payload_size": 1800,
+      "corruption": "8 DotCode header errors (max t=8) + 8 errors in RS block 5 (max t=8)"
+    }
   },
   "cases": {
     "case1_m1": {

@@ -1,45 +1,68 @@
 //! Strict byte-exact golden tests (`assert_eq!`, zero tolerance).
 //!
-//! Fixtures are clean-room synthetic deterministic payloads only. Expected
-//! values are hand-derived field/generator constants and frozen format
-//! bytes, verified byte-for-byte.
+//! Fixtures are clean-room synthetic deterministic payloads only. ARM7TDMI
+//! expected outputs were captured directly from the retail e-Reader (USA,
+//! `PSAE`) ROM running headless in `libmgba.so.0.10`:
+//! - `vpk0` decoder at `0x03004d0c` (8 cases, both methods, 13,674 bytes)
+//! - GF(256) `0x187` table builder `FUN_08712ea4` (512 bytes: exp + log)
+//! - `ST Decoder Ver.1.10 for CARDe` at `0x08711ad0` (clean & corrupted short
+//!   1,872 B and long 2,912 B `.raw` strips -> 1,296 B & 2,064 B decoded data)
 
 use gba_ereader::dotcode::{
-    assemble_strips, bin_to_raw, build_bin, crc32, demodulate, modulate, raw_to_bin,
-    split_into_strips, MODULATION_TABLE,
+    assemble_strips, bin_to_raw, build_bin, crc32, demodulate, modulate, parse_bin, raw_to_bin,
+    split_into_strips, LONG_STRIP_RAW_LEN, MODULATION_TABLE, NIBBLE_MODULATION,
+    SHORT_STRIP_RAW_LEN,
 };
 use gba_ereader::render::{module_px, render_strip};
-use gba_ereader::rs_ecc::{gf_mul, rs_check, rs_correct, rs_encode_parity, rs_generator};
+use gba_ereader::rs_ecc::{
+    gf_mul, rs_check, rs_correct, rs_correct_inverted, rs_encode_parity,
+    rs_encode_parity_inverted, rs_generator, GF_EXP, GF_LOG, GF_PRIMITIVE_POLY, RS_FCR,
+};
 use gba_ereader::version::EreaderRevision;
 use gba_ereader::vpk0::{vpk0_compress, vpk0_compress_with_method, vpk0_decompress};
 
 #[test]
-fn golden_generator_polynomials() {
-    let mut g = [0u8; 8];
-    let n = rs_generator(1, &mut g).unwrap();
-    assert_eq!(&g[..n], &[1, 1]);
-    let n = rs_generator(2, &mut g).unwrap();
-    assert_eq!(&g[..n], &[1, 3, 2]);
+fn golden_generator_polynomials_fcr120() {
+    assert_eq!(GF_PRIMITIVE_POLY, 0x187);
+    assert_eq!(RS_FCR, 120);
+    let mut g = [0u8; 17];
+    let n = rs_generator(16, &mut g).unwrap();
+    assert_eq!(n, 17);
+    assert_eq!(g[0], 1);
+    assert_eq!(g[16], 1);
+    // FCR=120 with nsym=16 produces a self-reciprocal generator polynomial.
+    for i in 0..=16 {
+        assert_eq!(g[i], g[16 - i]);
+    }
 }
 
 #[test]
 fn golden_zero_message_parity_is_zero() {
     let mut parity = [0xAAu8; 16];
-    rs_encode_parity(&[0u8; 32], 16, &mut parity).unwrap();
+    rs_encode_parity(&[0u8; 48], 16, &mut parity).unwrap();
     assert_eq!(parity, [0u8; 16]);
+    rs_encode_parity_inverted(&[0u8; 48], 16, &mut parity).unwrap();
+    assert_eq!(parity, [0xFFu8; 16]);
 }
 
 #[test]
-fn golden_modulation_prefix() {
-    // Smallest 10-bit symbols with popcount 5, ascending.
-    assert_eq!(MODULATION_TABLE[0], 0x01F);
-    assert_eq!(MODULATION_TABLE[1], 0x02F);
-    assert_eq!(MODULATION_TABLE[2], 0x037);
-    assert_eq!(MODULATION_TABLE[3], 0x03B);
-    assert_eq!(MODULATION_TABLE[4], 0x03D);
-    assert_eq!(MODULATION_TABLE[5], 0x03E);
+fn golden_arm_modulation_table_exact() {
+    // Verified against PSAE scan-mode IWRAM 0x03006214 (4-to-5-bit nibble LUT).
+    assert_eq!(
+        NIBBLE_MODULATION,
+        [0x00, 0x01, 0x02, 0x12, 0x04, 0x05, 0x06, 0x16, 0x08, 0x09, 0x0A, 0x14, 0x0C, 0x0D, 0x11, 0x10]
+    );
+    assert_eq!(MODULATION_TABLE[0x00], 0x000);
+    assert_eq!(MODULATION_TABLE[0x03], 0x012);
+    assert_eq!(MODULATION_TABLE[0x07], 0x016);
+    assert_eq!(MODULATION_TABLE[0x0B], 0x014);
+    assert_eq!(MODULATION_TABLE[0x0E], 0x011);
+    assert_eq!(MODULATION_TABLE[0x0F], 0x010);
+    assert_eq!(MODULATION_TABLE[0xFF], 0x210);
     for b in 0u8..=255 {
-        assert_eq!(demodulate(modulate(b)).unwrap(), b);
+        let sym = modulate(b);
+        assert_eq!(demodulate(sym).unwrap(), b);
+        assert_eq!(sym & (sym >> 1) & (sym >> 2), 0);
     }
 }
 
@@ -50,7 +73,7 @@ fn golden_crc32_check_value() {
 
 #[test]
 fn golden_field_spot_values() {
-    assert_eq!(gf_mul(2, 128), 29); // x * x^7 = x^8 mod 0x11D = 0x1D
+    assert_eq!(gf_mul(2, 128), 0x87); // x * x^7 = x^8 mod 0x187 = 0x87
     assert_eq!(gf_mul(0, 200), 0);
     assert_eq!(gf_mul(1, 200), 200);
 }
@@ -92,6 +115,9 @@ fn golden_full_pipeline_roundtrip_with_corruption() {
     for strip in &strips {
         let raw = bin_to_raw(strip).unwrap();
         let mut damaged = raw.clone();
+        // Corrupt both the 24-byte DotCode header and payload RS blocks.
+        damaged[0] ^= 0xFF;
+        damaged[3 * 104 + 1] ^= 0x81;
         damaged[20] ^= 0x81;
         damaged[200] ^= 0x42;
         let bin = raw_to_bin(&damaged).unwrap();
@@ -105,18 +131,89 @@ fn golden_full_pipeline_roundtrip_with_corruption() {
 
 #[test]
 fn golden_rs_corrects_up_to_bound() {
-    let msg = b"golden rs block payload";
+    let mut msg = [0u8; 48];
+    for (i, b) in msg.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(17).wrapping_add(3);
+    }
     let nsym = 16;
-    let mut cw = vec![0u8; msg.len() + nsym];
-    cw[..msg.len()].copy_from_slice(msg);
-    rs_encode_parity(msg, nsym, &mut cw[msg.len()..]).unwrap();
+    let mut cw = [0u8; 64];
+    cw[..48].copy_from_slice(&msg);
+    rs_encode_parity(&msg, nsym, &mut cw[48..]).unwrap();
     assert!(rs_check(&cw, nsym));
-    let orig = cw.clone();
+    let orig = cw;
     for i in 0..8 {
-        cw[i * 3] ^= 0x5A;
+        cw[i * 7 + 1] ^= 0x5A;
     }
     assert_eq!(rs_correct(&mut cw, nsym).unwrap(), 8);
     assert_eq!(cw, orig);
+
+    // Inverted-parity variant matching .raw strips.
+    let mut cwi = [0u8; 64];
+    cwi[..48].copy_from_slice(&msg);
+    rs_encode_parity_inverted(&msg, nsym, &mut cwi[48..]).unwrap();
+    let orig_i = cwi;
+    for i in 0..8 {
+        cwi[i * 7 + 3] ^= 0xA5;
+    }
+    assert_eq!(rs_correct_inverted(&mut cwi, nsym).unwrap(), 8);
+    assert_eq!(cwi, orig_i);
+}
+
+// ---------------------------------------------------------------------------
+// libmgba ARM7TDMI goldens: GF(256) 0x187 tables (FUN_08712ea4) and
+// ST Decoder Ver.1.10 for CARDe (FUN_08711ad0) from retail PSAE ROM.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn golden_arm_gf256_0x187_tables_byte_exact() {
+    let arm_tables = include_bytes!("golden/gf256_0x187_arm.bin");
+    assert_eq!(arm_tables.len(), 512);
+    // FUN_08712ea4 writes exp[0..255] = alpha^i, exp[255] = 0, and log[0..256] (log[0] = 0xFF).
+    assert_eq!(&GF_EXP[..255], &arm_tables[..255]);
+    assert_eq!(arm_tables[255], 0);
+    assert_eq!(&GF_LOG[..], &arm_tables[256..512]);
+}
+
+#[test]
+fn golden_arm_st_decoder_short_strip_byte_exact() {
+    let raw_clean = include_bytes!("golden/strip_short_clean.raw");
+    let raw_corrupt = include_bytes!("golden/strip_short_corrupt.raw");
+    let arm_decoded = include_bytes!("golden/strip_short_arm.bin");
+    assert_eq!(raw_clean.len(), SHORT_STRIP_RAW_LEN);
+    assert_eq!(raw_corrupt.len(), SHORT_STRIP_RAW_LEN);
+    assert_eq!(arm_decoded.len(), 1296);
+
+    let bin_clean = raw_to_bin(raw_clean).unwrap();
+    let bin_corrupt = raw_to_bin(raw_corrupt).unwrap();
+    assert_eq!(bin_clean, bin_corrupt);
+    // Decoded payload (blocks 1..27 = 1,296 bytes) matches PSAE FUN_08711ad0 byte-for-byte.
+    assert_eq!(&bin_clean[48..], &arm_decoded[..]);
+    let (hdr, trimmed) = parse_bin(&bin_clean).unwrap();
+    assert_eq!(hdr.payload_len, 512);
+    assert_eq!(trimmed, &arm_decoded[..512]);
+    // Re-encoding the .bin back to .raw produces the exact 1,872-byte strip.
+    assert_eq!(bin_to_raw(&bin_clean).unwrap().as_slice(), &raw_clean[..]);
+}
+
+#[test]
+fn golden_arm_st_decoder_long_strip_byte_exact() {
+    let raw_clean = include_bytes!("golden/strip_long_clean.raw");
+    let raw_corrupt = include_bytes!("golden/strip_long_corrupt.raw");
+    let arm_decoded = include_bytes!("golden/strip_long_arm.bin");
+    assert_eq!(raw_clean.len(), LONG_STRIP_RAW_LEN);
+    assert_eq!(raw_corrupt.len(), LONG_STRIP_RAW_LEN);
+    assert_eq!(arm_decoded.len(), 2064);
+
+    let bin_clean = raw_to_bin(raw_clean).unwrap();
+    let bin_corrupt = raw_to_bin(raw_corrupt).unwrap();
+    assert_eq!(bin_clean, bin_corrupt);
+    // Decoded payload (blocks 1..43 = 2,064 bytes) matches PSAE FUN_08711ad0 byte-for-byte.
+    assert_eq!(&bin_clean[48..], &arm_decoded[..]);
+    let (hdr, trimmed) = parse_bin(&bin_clean).unwrap();
+    assert_eq!(hdr.payload_len, 1800);
+    assert_eq!(trimmed, &arm_decoded[..1800]);
+    // Re-encoding the .bin back to .raw produces the exact 2,912-byte strip.
+    assert_eq!(bin_to_raw(&bin_clean).unwrap().as_slice(), &raw_clean[..]);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +261,7 @@ const ARM_CASES: [(&[u8], &[u8]); 8] = [
 fn golden_arm_vpk0_decoder_byte_exact() {
     let manifest = include_str!("golden/manifest.json");
     assert!(manifest.contains("0x03004d0c"));
+    assert!(manifest.contains("0x08711ad0"));
     let mut total = 0usize;
     for (vpk, expected) in ARM_CASES {
         // Strict byte-for-byte equality with the ARM decoder's output.
@@ -182,11 +280,11 @@ fn golden_arm_vpk0_decoder_byte_exact() {
 fn golden_arm_vpk0_roundtrip_through_strips() {
     // ARM-verified streams also survive the .bin/.raw strip pipeline.
     for (vpk, expected) in ARM_CASES {
-        let bin = build_bin(1, 0, 0, 1, expected.len() as u32, vpk);
+        let bin = build_bin(1, 0, 0, 1, vpk).unwrap();
         let raw = bin_to_raw(&bin).unwrap();
         let back = raw_to_bin(&raw).unwrap();
         assert_eq!(&back, &bin);
-        let (_, payload) = gba_ereader::dotcode::parse_bin(&back).unwrap();
+        let (_, payload) = parse_bin(&back).unwrap();
         assert_eq!(&vpk0_decompress(payload).unwrap(), expected);
     }
 }
@@ -196,7 +294,7 @@ fn golden_render_dpi_scaling() {
     assert_eq!(module_px(300), 2);
     assert_eq!(module_px(600), 4);
     assert_eq!(module_px(1200), 8);
-    let bin = build_bin(1, 0, 0, 1, 4, b"gold");
+    let bin = build_bin(1, 0, 0, 1, b"gold").unwrap();
     let raw = bin_to_raw(&bin).unwrap();
     let lo = render_strip(&raw, 300).unwrap();
     let hi = render_strip(&raw, 600).unwrap();
