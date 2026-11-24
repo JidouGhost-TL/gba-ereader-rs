@@ -23,6 +23,10 @@ alloc = []
 name = "golden_tests"
 required-features = ["alloc"]
 
+[[test]]
+name = "demo_card_e2e"
+required-features = ["alloc"]
+
 [[bench]]
 name = "bench_ereader"
 harness = false

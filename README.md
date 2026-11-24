@@ -73,6 +73,29 @@ inverted parity, and `"NINTENDO"` TLV validation).
   `[0x00, 0x01, 0x02, 0x12, 0x04, 0x05, 0x06, 0x16, 0x08, 0x09, 0x0A, 0x14, 0x0C, 0x0D, 0x11, 0x10]`,
   guaranteeing no three consecutive black dots (`111`) anywhere in the strip.
 
+## End-to-End Hardware Scan Proof
+
+A 100% clean-room ARM7TDMI GBA Mode 3 program (`720` bytes) was compressed with
+`vpk0` (`665` bytes), wrapped in a retail-compatible `PSAE` Card Type `0x0E`
+48-byte DotCode header, RS(64,48)-encoded into a `1,872`-byte `.raw` strip,
+rendered into a printable 600 DPI Olympus/Nintendo DotCode strip, and swiped
+through the retail **e-Reader (USA, `PSAE`)** optical scanner in headless
+`libmgba.so.0.10` (`GBACartEReaderQueueCard` — zero read, checksum, or RS
+errors, followed by live `vpk0` decompression and ARM7TDMI execution at
+`0x02000000`):
+
+### 1. Rendered Printable DotCode Strip (`gba_ereader::render_strip`)
+
+![Printable Olympus/Nintendo DotCode strip rendered by gba-ereader-rs](docs/images/dotcode_strip_sample.png)
+
+*Top: full 18-block short strip (`1,872` bytes `.raw`, `2,572 × 192` px at 600 DPI). Bottom: 2× detail of blocks 0–3 showing the 5×5 rounded corner anchors, vertical sync/address bar, guard zones, and 4-to-5-bit modulated 26×40 dot data columns (guaranteed no `111` runs).*
+
+### 2. Live Retail `PSAE` Optical Scan & ARM7TDMI Execution in mGBA
+
+![Live headless mGBA screenshot of clean-room ARM7TDMI card scanned and executed by retail PSAE e-Reader ROM](docs/images/mgba_scan_proof.png)
+
+*Live headless `libmgba` framebuffer (`240 × 160` Mode 3, scaled 3× nearest-neighbor) captured directly after retail `PSAE` optically scanned the `.raw` strip, ran `ST Decoder Ver.1.10`, decompressed `vpk0`, and booted our clean-room ARM7TDMI test card. Reproduced end-to-end (including optical bitmap demodulation and RS corruption repair) in `tests/demo_card_e2e.rs`.*
+
 ## Golden tests
 
 `tests/golden_tests.rs` asserts byte-exact (`assert_eq!`, zero tolerance)

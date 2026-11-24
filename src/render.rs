@@ -138,21 +138,21 @@ impl StripBitmap {
             let (chunks, rem) = row.as_chunks::<8>();
             let mut bx = 0usize;
             for chunk in chunks {
-                // Palette index 0 = white (bit 1), 1 = black (bit 0).
-                dst[bx] = (((chunk[0] == 0) as u8) << 7)
-                    | (((chunk[1] == 0) as u8) << 6)
-                    | (((chunk[2] == 0) as u8) << 5)
-                    | (((chunk[3] == 0) as u8) << 4)
-                    | (((chunk[4] == 0) as u8) << 3)
-                    | (((chunk[5] == 0) as u8) << 2)
-                    | (((chunk[6] == 0) as u8) << 1)
-                    | ((chunk[7] == 0) as u8);
+                // Palette index 0 = white (bit 0), 1 = black (bit 1).
+                dst[bx] = (((chunk[0] != 0) as u8) << 7)
+                    | (((chunk[1] != 0) as u8) << 6)
+                    | (((chunk[2] != 0) as u8) << 5)
+                    | (((chunk[3] != 0) as u8) << 4)
+                    | (((chunk[4] != 0) as u8) << 3)
+                    | (((chunk[5] != 0) as u8) << 2)
+                    | (((chunk[6] != 0) as u8) << 1)
+                    | ((chunk[7] != 0) as u8);
                 bx += 1;
             }
             if !rem.is_empty() {
                 let mut byte = 0u8;
                 for (k, &p) in rem.iter().enumerate() {
-                    if p == 0 {
+                    if p != 0 {
                         byte |= 1 << (7 - k);
                     }
                 }
