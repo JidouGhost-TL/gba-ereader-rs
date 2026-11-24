@@ -1,5 +1,8 @@
 # gba-ereader
 
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
+[![no_std](https://img.shields.io/badge/no__std-compatible-success.svg)](#features)
+
 Pure Rust, zero-dependency, **ROM-verified hardware-exact** toolkit for the
 Nintendo GBA **e-Reader** dot-code system: the `vpk0` codec, GF(256)
 Reed-Solomon ECC (`0x187`, FCR `120`), 4-to-5-bit optical modulation,
@@ -131,9 +134,21 @@ cargo bench --bench bench_ereader
 ```
 
 Benchmarks cover `vpk0` decode/encode, `RS(64, 48)` encode and decode/correct
-(clean and 8-error max bound), and short (1,872 B) / long (2,912 B) `.raw` ↔ `.bin`
-strip round-trips.
+(clean and 8-error max bound), short (1,872 B) / long (2,912 B) `.raw` ↔ `.bin`
+strip round-trips, and printable DotCode bitmap rendering:
+
+| Benchmark | Throughput |
+|---|---:|
+| `vpk0` decode (8 KiB payload) | ~1,510 MB/s |
+| `vpk0` encode (8 KiB payload) | ~1,271 MB/s |
+| `RS(64, 48)` encode (`GF(256)` `0x187`, `FCR = 120`) | ~494 MB/s |
+| `RS(64, 48)` decode (clean / max 8 errors) | ~288 MB/s / ~60 MB/s |
+| `.bin` → `.raw` / `.raw` → `.bin` (short & long strips) | ~434 MB/s / ~277 MB/s |
+| `render_strip` (long strip, 600 DPI pixels) | ~14.0 GB/s |
 
 ## License
 
-Licensed under either of MIT or Apache-2.0 at your option.
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))

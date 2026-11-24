@@ -16,6 +16,19 @@
 //! ## Pipeline
 //! `payload -> vpk0 compress -> .bin strip -> .raw optical strip ->
 //! (print/scan) -> ECC repair -> .bin -> vpk0 decompress == payload`.
+//!
+//! ## Quickstart
+//! ```rust
+//! use gba_ereader::dotcode::{bin_to_raw, build_bin, parse_bin, raw_to_bin};
+//! use gba_ereader::vpk0::{vpk0_compress, vpk0_decompress};
+//!
+//! let compressed = vpk0_compress(b"hello e-reader").unwrap();
+//! let bin = build_bin(1, 0, 0, 1, &compressed).unwrap();
+//! let raw = bin_to_raw(&bin).unwrap();
+//! let repaired = raw_to_bin(&raw).unwrap();
+//! let (_, payload) = parse_bin(&repaired).unwrap();
+//! assert_eq!(vpk0_decompress(payload).unwrap(), b"hello e-reader".to_vec());
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
