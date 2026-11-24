@@ -1,16 +1,22 @@
-//! `vpk0` codec: header `"vpk0"`, big-endian decompressed size, method byte.
+//! `vpk0` codec, byte-exact with the e-Reader ROM decoder
+//! (`FUN_03004d0c` / `FUN_03004ad4` in IWRAM, verified in `libmgba`).
 //!
-//! Layout: `magic[4] | size_be[4] | method[1] | bitstream...`.
-//! The bitstream is packed LSB-first within each byte.
+//! Layout: `magic[4] | size_be[4] | method[1] | trees | tokens`.
+//! The bitstream is MSB-first. After the 9-byte header come two serialized
+//! Huffman-style *bit-width trees* (offset tree, then length tree). A tree
+//! is serialized on a stack discipline: a `0` bit plus an 8-bit leaf value
+//! pushes a leaf; a `1` bit combines the top two stack nodes (second-from-top
+//! becomes child 0, top becomes child 1); a final `1` bit with one node on
+//! the stack terminates the tree. Decoding a value walks a tree to a leaf,
+//! whose value is a bit width `w`, then reads `w` bits as the value (a
+//! single-leaf tree therefore encodes fixed-width values).
 //!
-//! * **Method 0** — fixed-width LZ77 tokens. A `0` bit introduces a literal
-//!   (8 bits). A `1` bit introduces a back-reference: 12-bit `offset - 1`
-//!   (distance 1..=4096) followed by a 4-bit length code (`length - 3`;
-//!   code 15 escapes to an extra 8 bits giving lengths up to 272).
-//! * **Method 1** — two-offset LZ77 with serialized bit-width trees: two
-//!   bytes after the header store the offset bit-width (4..=16) and length
-//!   bit-width (2..=8) — the roots of the offset/length width trees — after
-//!   which tokens use those widths (all-ones length code escapes as above).
+//! Tokens: a `0` bit introduces an 8-bit literal; a `1` bit introduces a
+//! back-reference: an offset value then a length value (copy count), each
+//! decoded through its tree. Method 0 uses the offset value directly as the
+//! distance. Method 1 splits the distance: a first value `v < 3` selects
+//! the low bits (`v + 1`) and a second value gives `distance = (v + 1) +
+//! (v2 - 2) * 4`; a first value `v >= 3` gives `distance = (v - 2) * 4`.
 
 use crate::error::{Error, Result};
 
@@ -18,12 +24,37 @@ use crate::error::{Error, Result};
 pub const VPK0_MAGIC: &[u8; 4] = b"vpk0";
 /// Header length in bytes (magic + size + method).
 pub const VPK0_HEADER_LEN: usize = 9;
-/// Maximum back-reference distance for method 0.
-pub const VPK0_MAX_OFFSET: usize = 4096;
-/// Minimum match length.
+/// Maximum back-reference distance encodable by the encoder.
+pub const VPK0_MAX_OFFSET: usize = 1 << 20;
+/// Minimum match length used by the encoder.
 pub const VPK0_MIN_MATCH: usize = 3;
-/// Maximum match length.
-pub const VPK0_MAX_MATCH: usize = 272;
+/// Maximum match length used by the encoder.
+pub const VPK0_MAX_MATCH: usize = 4096;
+
+// ---------------------------------------------------------------------------
+// Bit I/O (MSB-first)
+// ---------------------------------------------------------------------------
+
+pub(crate) struct BitReader<'a> {
+    data: &'a [u8],
+    bitpos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
+        Self { data, bitpos: 0 }
+    }
+    pub(crate) fn bits(&mut self, count: u32) -> Result<u32> {
+        let mut v = 0u32;
+        for _ in 0..count {
+            let byte = *self.data.get(self.bitpos / 8).ok_or(Error::UnexpectedEof)?;
+            let bit = (byte >> (7 - (self.bitpos % 8))) & 1;
+            v = (v << 1) | bit as u32;
+            self.bitpos += 1;
+        }
+        Ok(v)
+    }
+}
 
 #[cfg(feature = "alloc")]
 struct BitWriter {
@@ -38,48 +69,118 @@ impl BitWriter {
         Self { buf: alloc::vec::Vec::new(), cur: 0, nbits: 0 }
     }
     fn bits(&mut self, value: u32, count: u32) {
-        self.cur |= (value & ((1u32 << count) - 1)) << self.nbits;
-        self.nbits += count;
-        while self.nbits >= 8 {
-            self.buf.push((self.cur & 0xFF) as u8);
-            self.cur >>= 8;
-            self.nbits -= 8;
+        for i in (0..count).rev() {
+            self.cur = (self.cur << 1) | ((value >> i) & 1);
+            self.nbits += 1;
+            if self.nbits == 8 {
+                self.buf.push(self.cur as u8);
+                self.cur = 0;
+                self.nbits = 0;
+            }
         }
     }
     fn finish(mut self) -> alloc::vec::Vec<u8> {
         if self.nbits > 0 {
-            self.buf.push((self.cur & 0xFF) as u8);
+            self.buf.push((self.cur << (8 - self.nbits)) as u8);
         }
         self.buf
     }
 }
 
-struct BitReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-    cur: u32,
-    nbits: u32,
+// ---------------------------------------------------------------------------
+// Bit-width trees
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct Node {
+    child: [i32; 2],
+    sym: u8,
+    leaf: bool,
 }
 
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, cur: 0, nbits: 0 }
-    }
-    fn bits(&mut self, count: u32) -> Result<u32> {
-        while self.nbits < count {
-            if self.pos >= self.data.len() {
-                return Err(Error::UnexpectedEof);
-            }
-            self.cur |= (self.data[self.pos] as u32) << self.nbits;
-            self.pos += 1;
-            self.nbits += 8;
+const MAX_TREE_NODES: usize = 1023;
+
+struct Tree {
+    nodes: [Node; MAX_TREE_NODES],
+    count: usize,
+    root: usize,
+}
+
+impl Tree {
+    fn new() -> Self {
+        Self {
+            nodes: [Node { child: [-1, -1], sym: 0, leaf: false }; MAX_TREE_NODES],
+            count: 0,
+            root: 0,
         }
-        let v = self.cur & ((1u32 << count) - 1);
-        self.cur >>= count;
-        self.nbits -= count;
-        Ok(v)
+    }
+    fn is_leaf_root(&self) -> bool {
+        self.count == 1
     }
 }
+
+fn parse_tree(reader: &mut BitReader<'_>) -> Result<Tree> {
+    let mut tree = Tree::new();
+    let mut stack = [0usize; 512];
+    let mut sp = 0usize;
+    loop {
+        let bit = reader.bits(1)?;
+        if bit == 0 {
+            let sym = reader.bits(8)? as u8;
+            if tree.count >= MAX_TREE_NODES || sp >= stack.len() {
+                return Err(Error::InvalidHeader("vpk0 tree too large"));
+            }
+            let idx = tree.count;
+            tree.count += 1;
+            tree.nodes[idx] = Node { child: [-1, -1], sym, leaf: true };
+            stack[sp] = idx;
+            sp += 1;
+        } else {
+            if sp <= 1 {
+                break;
+            }
+            if tree.count >= MAX_TREE_NODES {
+                return Err(Error::InvalidHeader("vpk0 tree too large"));
+            }
+            let child1 = stack[sp - 1];
+            let child0 = stack[sp - 2];
+            sp -= 1;
+            let idx = tree.count;
+            tree.count += 1;
+            tree.nodes[idx] = Node { child: [child0 as i32, child1 as i32], sym: 0, leaf: false };
+            stack[sp - 1] = idx;
+        }
+    }
+    if sp != 1 {
+        return Err(Error::InvalidHeader("vpk0 tree malformed"));
+    }
+    tree.root = stack[0];
+    Ok(tree)
+}
+
+fn decode_value(tree: &Tree, reader: &mut BitReader<'_>) -> Result<u32> {
+    let width = if tree.is_leaf_root() {
+        tree.nodes[tree.root].sym as u32
+    } else {
+        let mut idx = tree.root;
+        loop {
+            let node = &tree.nodes[idx];
+            if node.leaf {
+                break node.sym as u32;
+            }
+            let bit = reader.bits(1)? as usize;
+            idx = node.child[bit] as usize;
+        }
+    };
+    if width > 24 {
+        return Err(Error::InvalidHeader("vpk0 bit width too large"));
+    }
+    reader.bits(width)
+}
+
+// ---------------------------------------------------------------------------
+// Header / decompression
+// ---------------------------------------------------------------------------
 
 fn parse_header(data: &[u8]) -> Result<(usize, u8)> {
     if data.len() < VPK0_HEADER_LEN {
@@ -97,7 +198,7 @@ pub fn vpk0_decompressed_size(data: &[u8]) -> Result<usize> {
     Ok(parse_header(data)?.0)
 }
 
-/// Decompress a `vpk0` stream into `out`; returns bytes written.
+/// Decompress a `vpk0` stream into a newly allocated vector.
 #[cfg(feature = "alloc")]
 pub fn vpk0_decompress(data: &[u8]) -> Result<alloc::vec::Vec<u8>> {
     let (size, _) = parse_header(data)?;
@@ -110,70 +211,168 @@ pub fn vpk0_decompress(data: &[u8]) -> Result<alloc::vec::Vec<u8>> {
 /// Decompress a `vpk0` stream into a caller buffer; returns bytes written.
 pub fn vpk0_decompress_into(data: &[u8], out: &mut [u8]) -> Result<usize> {
     let (size, method) = parse_header(data)?;
+    if method > 1 {
+        return Err(Error::InvalidMethod(method));
+    }
     if out.len() < size {
         return Err(Error::OutputTooSmall);
     }
-    let (off_bits, len_bits, stream): (u32, u32, &[u8]) = match method {
-        0 => (12, 4, &data[VPK0_HEADER_LEN..]),
-        1 => {
-            if data.len() < VPK0_HEADER_LEN + 2 {
-                return Err(Error::UnexpectedEof);
-            }
-            let ob = data[VPK0_HEADER_LEN] as u32;
-            let lb = data[VPK0_HEADER_LEN + 1] as u32;
-            if !(4..=16).contains(&ob) || !(2..=8).contains(&lb) {
-                return Err(Error::InvalidHeader("vpk0 bit-width out of range"));
-            }
-            (ob, lb, &data[VPK0_HEADER_LEN + 2..])
-        }
-        m => return Err(Error::InvalidMethod(m)),
-    };
-    let max_off = 1usize << off_bits;
-    let len_escape = (1u32 << len_bits) - 1;
-    let mut reader = BitReader::new(stream);
+    let mut reader = BitReader::new(&data[VPK0_HEADER_LEN..]);
+    let offset_tree = parse_tree(&mut reader)?;
+    let length_tree = parse_tree(&mut reader)?;
     let mut produced = 0usize;
+    let mut match_len = 0usize;
+    let mut match_dist = 0usize;
     while produced < size {
+        if match_len > 0 {
+            if match_dist > produced {
+                return Err(Error::InvalidHeader("vpk0 offset out of range"));
+            }
+            out[produced] = out[produced - match_dist];
+            produced += 1;
+            match_len -= 1;
+            continue;
+        }
         let tag = reader.bits(1)?;
         if tag == 0 {
             out[produced] = reader.bits(8)? as u8;
             produced += 1;
         } else {
-            let offset = reader.bits(off_bits)? as usize + 1;
-            if offset > produced || offset > max_off {
+            let v = decode_value(&offset_tree, &mut reader)?;
+            let dist = if method == 0 {
+                v as usize
+            } else if v < 3 {
+                let v2 = decode_value(&offset_tree, &mut reader)?;
+                (v as usize + 1) + (v2 as usize).saturating_sub(2) * 4
+            } else {
+                (v as usize - 2) * 4
+            };
+            if dist == 0 || dist > produced {
                 return Err(Error::InvalidHeader("vpk0 offset out of range"));
             }
-            let code = reader.bits(len_bits)?;
-            let len = if code == len_escape {
-                reader.bits(8)? as usize + len_escape as usize + VPK0_MIN_MATCH
-            } else {
-                code as usize + VPK0_MIN_MATCH
-            };
+            let len = decode_value(&length_tree, &mut reader)? as usize;
             if produced + len > size {
                 return Err(Error::InvalidSize("vpk0 match overruns output"));
             }
-            for i in 0..len {
-                out[produced] = out[produced - offset];
-                produced += 1;
-                let _ = i;
-            }
+            match_dist = dist;
+            match_len = len;
         }
     }
     Ok(produced)
 }
 
+// ---------------------------------------------------------------------------
+// Compression
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "alloc")]
+enum Token {
+    Literal(u8),
+    Match { dist: usize, len: usize },
+}
+
+#[cfg(feature = "alloc")]
+fn offset_values(method: u8, dist: usize) -> (u32, Option<u32>) {
+    if method == 0 {
+        (dist as u32, None)
+    } else if dist.is_multiple_of(4) {
+        ((dist / 4 + 2) as u32, None)
+    } else {
+        ((dist % 4 - 1) as u32, Some((dist / 4 + 2) as u32))
+    }
+}
+
+#[cfg(feature = "alloc")]
+fn bit_width(v: u32) -> u32 {
+    32 - v.leading_zeros()
+}
+
+#[cfg(feature = "alloc")]
+struct EncNode {
+    child: [i32; 2],
+    sym: u8,
+    leaf: bool,
+    freq: u64,
+}
+
+/// Build a Huffman tree over width symbols; returns nodes with root last.
+#[cfg(feature = "alloc")]
+fn build_tree(widths: &[(u32, u64)]) -> alloc::vec::Vec<EncNode> {
+    let mut nodes: alloc::vec::Vec<EncNode> = widths
+        .iter()
+        .map(|&(w, f)| EncNode { child: [-1, -1], sym: w as u8, leaf: true, freq: f })
+        .collect();
+    if nodes.len() == 1 {
+        return nodes;
+    }
+    let mut alive: alloc::vec::Vec<usize> = (0..nodes.len()).collect();
+    while alive.len() > 1 {
+        alive.sort_by_key(|&i| (nodes[i].freq, i));
+        let a = alive.remove(0);
+        let b = alive.remove(0);
+        let freq = nodes[a].freq + nodes[b].freq;
+        nodes.push(EncNode { child: [a as i32, b as i32], sym: 0, leaf: false, freq });
+        alive.push(nodes.len() - 1);
+    }
+    nodes
+}
+
+#[cfg(feature = "alloc")]
+fn write_tree(nodes: &[EncNode], w: &mut BitWriter) {
+    fn emit(nodes: &[EncNode], idx: usize, w: &mut BitWriter) {
+        let n = &nodes[idx];
+        if n.leaf {
+            w.bits(0, 1);
+            w.bits(n.sym as u32, 8);
+        } else {
+            emit(nodes, n.child[0] as usize, w);
+            emit(nodes, n.child[1] as usize, w);
+            w.bits(1, 1);
+        }
+    }
+    emit(nodes, nodes.len() - 1, w);
+    w.bits(1, 1); // terminator
+}
+
+#[cfg(feature = "alloc")]
+fn tree_path(nodes: &[EncNode], width: u32) -> Option<(u32, u32)> {
+    fn find(nodes: &[EncNode], idx: usize, width: u32, path: u32, depth: u32) -> Option<(u32, u32)> {
+        let n = &nodes[idx];
+        if n.leaf {
+            if n.sym as u32 == width {
+                Some((path, depth))
+            } else {
+                None
+            }
+        } else {
+            find(nodes, n.child[0] as usize, width, path << 1, depth + 1)
+                .or_else(|| find(nodes, n.child[1] as usize, width, (path << 1) | 1, depth + 1))
+        }
+    }
+    find(nodes, nodes.len() - 1, width, 0, 0)
+}
+
+#[cfg(feature = "alloc")]
+fn write_value(nodes: &[EncNode], value: u32, w: &mut BitWriter) {
+    let width = bit_width(value);
+    if nodes.len() == 1 {
+        // Single-leaf tree: decoder reads `width` bits directly.
+        debug_assert_eq!(nodes[0].sym as u32, width);
+    } else {
+        let (path, depth) = tree_path(nodes, width).expect("width in tree");
+        w.bits(path, depth);
+    }
+    w.bits(value, width);
+}
+
 /// Compress `data` with the given method (0 or 1) into a `vpk0` stream.
 #[cfg(feature = "alloc")]
 pub fn vpk0_compress_with_method(data: &[u8], method: u8) -> Result<alloc::vec::Vec<u8>> {
-    let (off_bits, len_bits): (u32, u32) = match method {
-        0 => (12, 4),
-        1 => (12, 4),
-        m => return Err(Error::InvalidMethod(m)),
-    };
-    let max_off = core::cmp::min(1usize << off_bits, VPK0_MAX_OFFSET.max(1usize << off_bits));
-    let len_escape = (1u32 << len_bits) - 1;
-    let mut w = BitWriter::new();
-    // Most-recent position per 3-byte hash bucket: O(1) candidate lookup
-    // instead of a quadratic window scan.
+    if method > 1 {
+        return Err(Error::InvalidMethod(method));
+    }
+    // Tokenize with a 3-byte hash chain (most recent candidate).
+    let mut tokens: alloc::vec::Vec<Token> = alloc::vec::Vec::new();
     let mut last = alloc::vec![-1i32; 8192];
     let hash3 = |data: &[u8], pos: usize| -> usize {
         let v = ((data[pos] as usize) << 16) | ((data[pos + 1] as usize) << 8) | data[pos + 2] as usize;
@@ -181,53 +380,93 @@ pub fn vpk0_compress_with_method(data: &[u8], method: u8) -> Result<alloc::vec::
     };
     let mut i = 0usize;
     while i < data.len() {
-        let window_start = i.saturating_sub(max_off);
         let mut best_len = 0usize;
         let mut best_off = 0usize;
         if i + VPK0_MIN_MATCH <= data.len() {
             let h = hash3(data, i);
             let cand = last[h];
             last[h] = i as i32;
-            if cand >= 0 && (cand as usize) >= window_start && (cand as usize) < i {
+            if cand >= 0 {
                 let start = cand as usize;
-                let max_possible = core::cmp::min(VPK0_MAX_MATCH, data.len() - i);
-                let mut l = 0usize;
-                while l < max_possible && data[start + l] == data[i + l] {
-                    l += 1;
-                }
-                if l >= VPK0_MIN_MATCH {
-                    best_len = l;
-                    best_off = i - start;
+                let dist = i - start;
+                if dist <= VPK0_MAX_OFFSET && start < i {
+                    let max_possible = core::cmp::min(VPK0_MAX_MATCH, data.len() - i);
+                    let mut l = 0usize;
+                    while l < max_possible && data[start + l] == data[i + l] {
+                        l += 1;
+                    }
+                    if l >= VPK0_MIN_MATCH {
+                        best_len = l;
+                        best_off = dist;
+                    }
                 }
             }
         }
         if best_len >= VPK0_MIN_MATCH {
-            w.bits(1, 1);
-            w.bits((best_off - 1) as u32, off_bits);
-            let code_len = best_len - VPK0_MIN_MATCH;
-            if (code_len as u32) < len_escape {
-                w.bits(code_len as u32, len_bits);
-            } else {
-                w.bits(len_escape, len_bits);
-                let extra = code_len - len_escape as usize;
-                w.bits(extra as u32, 8);
-            }
+            tokens.push(Token::Match { dist: best_off, len: best_len });
             i += best_len;
         } else {
-            w.bits(0, 1);
-            w.bits(data[i] as u32, 8);
+            tokens.push(Token::Literal(data[i]));
             i += 1;
         }
     }
+
+    // Collect width frequencies for both trees.
+    let mut off_freq: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
+    let mut len_freq: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
+    let bump = |freq: &mut alloc::vec::Vec<(u32, u64)>, width: u32| {
+        if let Some(e) = freq.iter_mut().find(|e| e.0 == width) {
+            e.1 += 1;
+        } else {
+            freq.push((width, 1));
+        }
+    };
+    for t in &tokens {
+        if let Token::Match { dist, len } = t {
+            let (v1, v2) = offset_values(method, *dist);
+            bump(&mut off_freq, bit_width(v1));
+            if let Some(v2) = v2 {
+                bump(&mut off_freq, bit_width(v2));
+            }
+            bump(&mut len_freq, bit_width(*len as u32));
+        }
+    }
+    if off_freq.is_empty() {
+        off_freq.push((0, 1));
+    }
+    if len_freq.is_empty() {
+        len_freq.push((0, 1));
+    }
+    off_freq.sort();
+    len_freq.sort();
+    let off_tree = build_tree(&off_freq);
+    let len_tree = build_tree(&len_freq);
+
+    let mut w = BitWriter::new();
+    write_tree(&off_tree, &mut w);
+    write_tree(&len_tree, &mut w);
+    for t in &tokens {
+        match t {
+            Token::Literal(b) => {
+                w.bits(0, 1);
+                w.bits(*b as u32, 8);
+            }
+            Token::Match { dist, len } => {
+                w.bits(1, 1);
+                let (v1, v2) = offset_values(method, *dist);
+                write_value(&off_tree, v1, &mut w);
+                if let Some(v2) = v2 {
+                    write_value(&off_tree, v2, &mut w);
+                }
+                write_value(&len_tree, *len as u32, &mut w);
+            }
+        }
+    }
     let body = w.finish();
-    let mut out = alloc::vec::Vec::with_capacity(VPK0_HEADER_LEN + 2 + body.len());
+    let mut out = alloc::vec::Vec::with_capacity(VPK0_HEADER_LEN + body.len());
     out.extend_from_slice(VPK0_MAGIC);
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
     out.push(method);
-    if method == 1 {
-        out.push(off_bits as u8);
-        out.push(len_bits as u8);
-    }
     out.extend_from_slice(&body);
     Ok(out)
 }
@@ -266,6 +505,10 @@ mod tests {
         }
         let empty = vpk0_compress(&[]).unwrap();
         assert_eq!(vpk0_decompress(&empty).unwrap(), alloc::vec::Vec::<u8>::new());
+        let one = vpk0_compress(&[42]).unwrap();
+        assert_eq!(vpk0_decompress(&one).unwrap(), alloc::vec![42]);
+        let runs = vpk0_compress_with_method(&[7u8; 500], 1).unwrap();
+        assert_eq!(vpk0_decompress(&runs).unwrap(), alloc::vec![7u8; 500]);
     }
 
     #[test]

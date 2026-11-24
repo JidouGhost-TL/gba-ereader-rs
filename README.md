@@ -23,7 +23,7 @@ printable dot-code strip renderer.
 |---|---|
 | `error` | `#[non_exhaustive]` error enum + `Result` alias |
 | `version` | `EreaderRegion` / `EreaderRevision` + `detect_from_bytes` |
-| `vpk0` | `vpk0` decode + encode (method 0 fixed-width, method 1 bit-width trees) |
+| `vpk0` | `vpk0` decode + encode, byte-exact with the ROM decoder (MSB-first bitstream, serialized bit-width trees, methods 0/1) |
 | `rs_ecc` | GF(256) Reed-Solomon encode + decode/correct (`0x11D`) |
 | `dotcode` | 8-to-10 modulation, `.raw` ↔ `.bin`, 48-byte card header, multi-strip assembly |
 | `render` | Printable strip bitmaps (PBM/PGM/BMP) at 300/600/1200 DPI |
@@ -44,6 +44,10 @@ Detection reads the game code at `0xAC` and confirms the header title at
 `payload -> vpk0 compress -> .bin strip -> .raw optical strip -> print/scan
 -> ECC repair -> .bin -> vpk0 decompress == payload`
 
+The `vpk0` format (byte-exact with the e-Reader ROM decoder at
+`0x03004d0c`, verified in `libmgba.so.0.10`) is a 9-byte header
+(`vpk0`, big-endian size, method byte) followed by two serialized
+bit-width trees (offset, then length) and an MSB-first token stream.
 The `.bin` format is a 48-byte header (magic `ERB1`, region, card type,
 strip index/count, payload/total lengths, payload CRC-32, header CRC-32)
 followed by the payload. The `.raw` format packs 10-bit modulated symbols

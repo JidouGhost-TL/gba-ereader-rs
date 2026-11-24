@@ -62,8 +62,6 @@ fn golden_vpk0_header_bytes() {
     assert_eq!(vpk0_decompress(&c).unwrap(), b"hello hello hello".to_vec());
     let c1 = vpk0_compress_with_method(b"hello hello hello", 1).unwrap();
     assert_eq!(&c1[0..9], b"vpk0\0\0\0\x11\x01");
-    assert_eq!(c1[9], 12);
-    assert_eq!(c1[10], 4);
     assert_eq!(vpk0_decompress(&c1).unwrap(), b"hello hello hello".to_vec());
 }
 
@@ -119,6 +117,78 @@ fn golden_rs_corrects_up_to_bound() {
     }
     assert_eq!(rs_correct(&mut cw, nsym).unwrap(), 8);
     assert_eq!(cw, orig);
+}
+
+// ---------------------------------------------------------------------------
+// libmgba ARM7TDMI goldens: .bin fixtures were captured from the real
+// e-Reader (USA) ROM vpk0 decoder at 0x03004d0c running headless in
+// libmgba.so.0.10 on clean-room synthetic streams (see golden/manifest.json).
+// ---------------------------------------------------------------------------
+
+const ARM_CASES: [(&[u8], &[u8]); 8] = [
+    (
+        include_bytes!("golden/case1_m0.vpk"),
+        include_bytes!("golden/case1_m0.bin"),
+    ),
+    (
+        include_bytes!("golden/case1_m1.vpk"),
+        include_bytes!("golden/case1_m1.bin"),
+    ),
+    (
+        include_bytes!("golden/case2_m0.vpk"),
+        include_bytes!("golden/case2_m0.bin"),
+    ),
+    (
+        include_bytes!("golden/case2_m1.vpk"),
+        include_bytes!("golden/case2_m1.bin"),
+    ),
+    (
+        include_bytes!("golden/case3_m0.vpk"),
+        include_bytes!("golden/case3_m0.bin"),
+    ),
+    (
+        include_bytes!("golden/case3_m1.vpk"),
+        include_bytes!("golden/case3_m1.bin"),
+    ),
+    (
+        include_bytes!("golden/case4_m0.vpk"),
+        include_bytes!("golden/case4_m0.bin"),
+    ),
+    (
+        include_bytes!("golden/case4_m1.vpk"),
+        include_bytes!("golden/case4_m1.bin"),
+    ),
+];
+
+#[test]
+fn golden_arm_vpk0_decoder_byte_exact() {
+    let manifest = include_str!("golden/manifest.json");
+    assert!(manifest.contains("0x03004d0c"));
+    let mut total = 0usize;
+    for (vpk, expected) in ARM_CASES {
+        // Strict byte-for-byte equality with the ARM decoder's output.
+        assert_eq!(&vpk0_decompress(vpk).unwrap(), expected);
+        assert_eq!(
+            gba_ereader::vpk0::vpk0_decompressed_size(vpk).unwrap(),
+            expected.len()
+        );
+        total += expected.len();
+    }
+    // 8 cases, both methods, 13,674 ARM-verified output bytes in total.
+    assert_eq!(total, 804 + 804 + 5000 + 5000 + 777 + 777 + 256 + 256);
+}
+
+#[test]
+fn golden_arm_vpk0_roundtrip_through_strips() {
+    // ARM-verified streams also survive the .bin/.raw strip pipeline.
+    for (vpk, expected) in ARM_CASES {
+        let bin = build_bin(1, 0, 0, 1, expected.len() as u32, vpk);
+        let raw = bin_to_raw(&bin).unwrap();
+        let back = raw_to_bin(&raw).unwrap();
+        assert_eq!(&back, &bin);
+        let (_, payload) = gba_ereader::dotcode::parse_bin(&back).unwrap();
+        assert_eq!(&vpk0_decompress(payload).unwrap(), expected);
+    }
 }
 
 #[test]

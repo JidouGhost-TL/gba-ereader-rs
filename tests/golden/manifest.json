@@ -1,0 +1,86 @@
+{
+  "description": "Byte-exact libmgba ARM7TDMI golden fixtures for gba-ereader vpk0. Streams are clean-room synthetic payloads compressed by the crate encoder; .bin outputs were captured from the real e-Reader (USA, PSAE) ROM vpk0 decoder FUN_03004d0c executed headless in libmgba.so.0.10 and verified byte-for-byte equal to the synthetic payloads. Size-query routine FUN_030051e0 also verified (804 for case1). No copyrighted card data.",
+  "rom": {
+    "title": "e-Reader (USA)",
+    "game_code": "PSAE",
+    "decoder_arm_addr": "0x03004d0c",
+    "size_query_arm_addr": "0x030051e0",
+    "bit_reader_arm_addr": "0x03005400",
+    "tree_builder_arm_addr": "0x03004a10",
+    "decode_loop_arm_addr": "0x03004ad4"
+  },
+  "cases": {
+    "case1_m1": {
+      "file_vpk": "case1_m1.vpk",
+      "file_bin": "case1_m1.bin",
+      "method": 1,
+      "compressed_size": 363,
+      "decompressed_size": 804,
+      "vpk_sha256": "67e49fab53ec6e992b419bbea6eb0ea98923c155e3c0776903815c40b7a13404",
+      "bin_sha256": "7a5f033a981fdab4ab32acd5eed7ba8ea5e9f3113d1fb5e2feaf2ccf6341c0dc"
+    },
+    "case1_m0": {
+      "file_vpk": "case1_m0.vpk",
+      "file_bin": "case1_m0.bin",
+      "method": 0,
+      "compressed_size": 360,
+      "decompressed_size": 804,
+      "vpk_sha256": "32f74fd1c6b90f0ae44cb50d1ed4c915b364e42a4feaf29ac689df66c9434613",
+      "bin_sha256": "7a5f033a981fdab4ab32acd5eed7ba8ea5e9f3113d1fb5e2feaf2ccf6341c0dc"
+    },
+    "case2_m1": {
+      "file_vpk": "case2_m1.vpk",
+      "file_bin": "case2_m1.bin",
+      "method": 1,
+      "compressed_size": 36,
+      "decompressed_size": 5000,
+      "vpk_sha256": "77a389bd53a3bd576558fd11188f87f42525651bb2a809125c5101b0ce5d7dc6",
+      "bin_sha256": "33c8197a78a236c79d5f26ac9c2f76700cd0079de37e4f84a80205bacfb2eb49"
+    },
+    "case2_m0": {
+      "file_vpk": "case2_m0.vpk",
+      "file_bin": "case2_m0.bin",
+      "method": 0,
+      "compressed_size": 35,
+      "decompressed_size": 5000,
+      "vpk_sha256": "104207e9ace33cd8d3eebe4f62801ba5fbc2d61ada920a4b2ba3ff453bdf9b69",
+      "bin_sha256": "33c8197a78a236c79d5f26ac9c2f76700cd0079de37e4f84a80205bacfb2eb49"
+    },
+    "case3_m1": {
+      "file_vpk": "case3_m1.vpk",
+      "file_bin": "case3_m1.bin",
+      "method": 1,
+      "compressed_size": 16,
+      "decompressed_size": 777,
+      "vpk_sha256": "a745fa52733e1d24250ccf1da960fc7407fb972cfd2f12fab963d928e3070039",
+      "bin_sha256": "250011eed996801c19d66ff5902ad820b1c148dea57cb61f2dcdafd96a65ce8f"
+    },
+    "case3_m0": {
+      "file_vpk": "case3_m0.vpk",
+      "file_bin": "case3_m0.bin",
+      "method": 0,
+      "compressed_size": 15,
+      "decompressed_size": 777,
+      "vpk_sha256": "da19096557a23824c59940c7bcd8084f8352d620b146aca04c700bc654e7be8a",
+      "bin_sha256": "250011eed996801c19d66ff5902ad820b1c148dea57cb61f2dcdafd96a65ce8f"
+    },
+    "case4_m0": {
+      "file_vpk": "case4_m0.vpk",
+      "file_bin": "case4_m0.bin",
+      "method": 0,
+      "compressed_size": 300,
+      "decompressed_size": 256,
+      "vpk_sha256": "e8428d15eb8d7e2b1dbf07063147a666b92f07fc5af222d039fbdce3c5edc2ac",
+      "bin_sha256": "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880"
+    },
+    "case4_m1": {
+      "file_vpk": "case4_m1.vpk",
+      "file_bin": "case4_m1.bin",
+      "method": 1,
+      "compressed_size": 300,
+      "decompressed_size": 256,
+      "vpk_sha256": "3af3c3c019efd840560fe59649fb387a7398894c8cca0e82daac81281e7cb22c",
+      "bin_sha256": "40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880"
+    }
+  }
+}
