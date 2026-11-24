@@ -3,7 +3,7 @@
 use core::fmt;
 
 /// Errors returned by `gba-ereader` operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Error {
     /// Input buffer ended before the expected structure was complete.

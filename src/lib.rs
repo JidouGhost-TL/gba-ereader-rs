@@ -30,8 +30,21 @@ pub mod rs_ecc;
 pub mod version;
 pub mod vpk0;
 
-pub use dotcode::{CardHeader, CardType, CARD_HEADER_LEN};
+#[cfg(feature = "alloc")]
+pub use dotcode::{assemble_strips, bin_to_raw, build_bin, raw_to_bin, split_into_strips};
+pub use dotcode::{
+    demodulate, is_short_strip, modulate, parse_bin, CardHeader, CardType, CARD_HEADER_LEN,
+    LONG_STRIP_RAW_LEN, SHORT_STRIP_RAW_LEN,
+};
 pub use error::{Error, Result};
+#[cfg(feature = "alloc")]
+pub use render::{render_strip, StripBitmap};
+pub use render::{module_px, SUPPORTED_DPI};
+#[cfg(feature = "alloc")]
+pub use rs_ecc::rs_encode;
+pub use rs_ecc::{
+    rs_check, rs_correct, rs_correct_inverted, rs_encode_parity, rs_encode_parity_inverted,
+};
 pub use version::{EreaderRegion, EreaderRevision};
 #[cfg(feature = "alloc")]
 pub use vpk0::{vpk0_compress, vpk0_compress_with_method, vpk0_decompress};

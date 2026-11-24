@@ -121,16 +121,34 @@ pub fn demodulate(symbol: u16) -> Result<u8> {
     }
 }
 
+const CRC32_TABLE: [u32; 256] = build_crc32_table();
+
+const fn build_crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut crc = i;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i as usize] = crc;
+        i += 1;
+    }
+    table
+}
+
 /// CRC-32 (IEEE 802.3, reflected polynomial `0xEDB88320`) utility checksum.
 #[must_use]
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
+        crc = (crc >> 8) ^ CRC32_TABLE[((crc as u8) ^ b) as usize];
     }
     !crc
 }
@@ -331,8 +349,8 @@ pub fn build_bin(
     } else {
         return Err(Error::InvalidSize("payload exceeds long strip capacity (2064 bytes)"));
     };
-    let mut padded = alloc::vec![0u8; max_payload];
-    padded[..payload.len()].copy_from_slice(payload);
+    let mut out = alloc::vec![0u8; CARD_HEADER_LEN + max_payload];
+    out[CARD_HEADER_LEN..CARD_HEADER_LEN + payload.len()].copy_from_slice(payload);
     let header = CardHeader {
         region,
         card_type,
@@ -340,13 +358,11 @@ pub fn build_bin(
         strip_count,
         payload_len: payload.len() as u16,
         flags: 0x01,
-        data_checksum: data_checksum(&padded),
+        data_checksum: 0,
         global_checksum: 0,
     };
-    let hdr_bytes = header.to_bytes(&padded);
-    let mut out = alloc::vec::Vec::with_capacity(CARD_HEADER_LEN + max_payload);
-    out.extend_from_slice(&hdr_bytes);
-    out.extend_from_slice(&padded);
+    let hdr_bytes = header.to_bytes(&out[CARD_HEADER_LEN..]);
+    out[..CARD_HEADER_LEN].copy_from_slice(&hdr_bytes);
     Ok(out)
 }
 
@@ -425,6 +441,9 @@ pub fn assemble_strips(strips: &[alloc::vec::Vec<u8>]) -> Result<alloc::vec::Vec
     parsed.sort_by_key(|(h, _)| h.strip_index);
     let mut out = alloc::vec::Vec::new();
     for (idx, (h, p)) in parsed.iter().enumerate() {
+        if h.strip_count as usize != count {
+            return Err(Error::InvalidStrip("strip count mismatch"));
+        }
         if h.strip_index as usize != idx {
             return Err(Error::InvalidStrip("missing strip index"));
         }
@@ -459,25 +478,22 @@ pub fn bin_to_raw(bin: &[u8]) -> Result<alloc::vec::Vec<u8>> {
     let (hdr_data, hdr_par) = dc_hdr.split_at_mut(8);
     rs_ecc::rs_encode_parity_inverted(hdr_data, 16, hdr_par)?;
 
-    // Encode `interleave` RS(64, 48) codewords with inverted parity.
-    let mut blocks = alloc::vec![[0u8; STRIP_BLOCK_LEN]; interleave];
-    for (i, blk) in blocks.iter_mut().enumerate() {
-        let start = i * STRIP_BLOCK_DATA;
+    // Encode `interleave` RS(64, 48) codewords and interleave column-wise into
+    // a single L1-resident stack buffer (max 44 * 64 = 2,816 bytes).
+    let total_stream = interleave * STRIP_BLOCK_LEN;
+    let mut interleaved = [0u8; LONG_STRIP_BLOCKS * STRIP_BLOCK_LEN];
+    let mut cw = [0u8; STRIP_BLOCK_LEN];
+    for col in 0..interleave {
+        cw.fill(0);
+        let start = col * STRIP_BLOCK_DATA;
         if start < bin.len() {
             let end = core::cmp::min(start + STRIP_BLOCK_DATA, bin.len());
-            blk[..end - start].copy_from_slice(&bin[start..end]);
+            cw[..end - start].copy_from_slice(&bin[start..end]);
         }
-        let (data_part, parity_part) = blk.split_at_mut(STRIP_BLOCK_DATA);
+        let (data_part, parity_part) = cw.split_at_mut(STRIP_BLOCK_DATA);
         rs_ecc::rs_encode_parity_inverted(data_part, STRIP_BLOCK_ECC, parity_part)?;
-    }
-
-    // Interleave column-wise across all 64 rows.
-    let mut interleaved = alloc::vec![0u8; interleave * STRIP_BLOCK_LEN];
-    let mut k = 0usize;
-    for row in 0..STRIP_BLOCK_LEN {
-        for blk in &blocks {
-            interleaved[k] = blk[row];
-            k += 1;
+        for (row, &byte) in cw.iter().enumerate() {
+            interleaved[row * interleave + col] = byte;
         }
     }
 
@@ -489,7 +505,7 @@ pub fn bin_to_raw(bin: &[u8]) -> Result<alloc::vec::Vec<u8>> {
         let hb = (pb % DOTCODE_HEADER_BLOCKS) * PHYSICAL_BLOCK_HEADER_BYTES;
         raw[base] = dc_hdr[hb];
         raw[base + 1] = dc_hdr[hb + 1];
-        let take = core::cmp::min(PHYSICAL_BLOCK_DATA_BYTES, interleaved.len() - data_pos);
+        let take = core::cmp::min(PHYSICAL_BLOCK_DATA_BYTES, total_stream - data_pos);
         if take > 0 {
             raw[base + PHYSICAL_BLOCK_HEADER_BYTES..base + PHYSICAL_BLOCK_HEADER_BYTES + take]
                 .copy_from_slice(&interleaved[data_pos..data_pos + take]);
@@ -537,28 +553,31 @@ pub fn raw_to_bin(raw: &[u8]) -> Result<alloc::vec::Vec<u8>> {
         return Err(Error::InvalidHeader("invalid interleave count in DotCode header"));
     }
 
-    // Gather interleaved payload+parity stream from the 102 data bytes of each physical block.
+    // Gather interleaved payload+parity stream into a stack buffer (max 2,856 bytes).
     let total_stream = interleave * rs_n;
-    let mut interleaved = alloc::vec::Vec::with_capacity(total_stream);
+    let mut interleaved = [0u8; LONG_STRIP_PHYSICAL_BLOCKS * PHYSICAL_BLOCK_DATA_BYTES];
+    let mut filled = 0usize;
     for pb in 0..phys_blocks {
-        let base = pb * PHYSICAL_BLOCK_LEN + PHYSICAL_BLOCK_HEADER_BYTES;
-        let rem = total_stream - interleaved.len();
+        let rem = total_stream - filled;
         if rem == 0 {
             break;
         }
+        let base = pb * PHYSICAL_BLOCK_LEN + PHYSICAL_BLOCK_HEADER_BYTES;
         let take = core::cmp::min(PHYSICAL_BLOCK_DATA_BYTES, rem);
-        interleaved.extend_from_slice(&raw[base..base + take]);
+        interleaved[filled..filled + take].copy_from_slice(&raw[base..base + take]);
+        filled += take;
     }
 
     // Deinterleave and RS(64, 48)-correct every block.
-    let mut out = alloc::vec::Vec::with_capacity(interleave * STRIP_BLOCK_DATA);
+    let mut out = alloc::vec![0u8; interleave * STRIP_BLOCK_DATA];
     let mut cw = [0u8; STRIP_BLOCK_LEN];
     for col in 0..interleave {
         for (row, slot) in cw.iter_mut().enumerate() {
             *slot = interleaved[row * interleave + col];
         }
         rs_ecc::rs_correct_inverted(&mut cw, STRIP_BLOCK_ECC)?;
-        out.extend_from_slice(&cw[..STRIP_BLOCK_DATA]);
+        out[col * STRIP_BLOCK_DATA..(col + 1) * STRIP_BLOCK_DATA]
+            .copy_from_slice(&cw[..STRIP_BLOCK_DATA]);
     }
 
     // Validate the 48-byte card header and both hardware checksums.

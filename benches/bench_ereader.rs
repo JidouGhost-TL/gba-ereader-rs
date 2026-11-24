@@ -2,6 +2,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use gba_ereader::dotcode::{bin_to_raw, build_bin, raw_to_bin};
+use gba_ereader::render::render_strip;
 use gba_ereader::rs_ecc::{rs_correct_inverted, rs_encode_parity_inverted};
 use gba_ereader::vpk0::{vpk0_compress, vpk0_decompress};
 
@@ -74,5 +75,20 @@ fn main() {
     });
     bench("raw -> bin long strip (2912 B)", 2000, raw_l.len(), || {
         black_box(raw_to_bin(black_box(&raw_l)).unwrap());
+    });
+
+    let bmp_s = render_strip(&raw_s, 300).unwrap();
+    bench("render short strip 300 DPI (pixels)", 1000, bmp_s.pixels.len(), || {
+        black_box(render_strip(black_box(&raw_s), 300).unwrap());
+    });
+    let bmp_l = render_strip(&raw_l, 600).unwrap();
+    bench("render long strip 600 DPI (pixels)", 200, bmp_l.pixels.len(), || {
+        black_box(render_strip(black_box(&raw_l), 600).unwrap());
+    });
+    bench("StripBitmap::to_pbm (long 600 DPI)", 200, bmp_l.pixels.len(), || {
+        black_box(black_box(&bmp_l).to_pbm());
+    });
+    bench("StripBitmap::to_bmp (long 600 DPI)", 200, bmp_l.pixels.len(), || {
+        black_box(black_box(&bmp_l).to_bmp());
     });
 }

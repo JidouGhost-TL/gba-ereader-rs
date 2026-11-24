@@ -41,7 +41,7 @@ pub const QUIET_ZONE: usize = 4;
 
 /// A 1-bit bitmap of a rendered strip (row-major, `true` = black dot).
 #[cfg(feature = "alloc")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StripBitmap {
     /// Width in pixels.
     pub width: usize,
@@ -55,6 +55,7 @@ pub struct StripBitmap {
 impl StripBitmap {
     /// Pixel at `(x, y)`, or `false` outside the bitmap.
     #[must_use]
+    #[inline]
     pub fn get(&self, x: usize, y: usize) -> bool {
         if x >= self.width || y >= self.height {
             false
@@ -67,18 +68,34 @@ impl StripBitmap {
     #[must_use]
     pub fn to_pbm(&self) -> alloc::vec::Vec<u8> {
         let header = alloc::format!("P4\n{} {}\n", self.width, self.height);
-        let mut out = header.into_bytes();
         let row_bytes = self.width.div_ceil(8);
+        let hdr_len = header.len();
+        let mut out = alloc::vec![0u8; hdr_len + self.height * row_bytes];
+        out[..hdr_len].copy_from_slice(header.as_bytes());
         for y in 0..self.height {
-            for bx in 0..row_bytes {
+            let row = &self.pixels[y * self.width..(y + 1) * self.width];
+            let dst = &mut out[hdr_len + y * row_bytes..hdr_len + (y + 1) * row_bytes];
+            let (chunks, rem) = row.as_chunks::<8>();
+            let mut bx = 0usize;
+            for chunk in chunks {
+                dst[bx] = (((chunk[0] != 0) as u8) << 7)
+                    | (((chunk[1] != 0) as u8) << 6)
+                    | (((chunk[2] != 0) as u8) << 5)
+                    | (((chunk[3] != 0) as u8) << 4)
+                    | (((chunk[4] != 0) as u8) << 3)
+                    | (((chunk[5] != 0) as u8) << 2)
+                    | (((chunk[6] != 0) as u8) << 1)
+                    | ((chunk[7] != 0) as u8);
+                bx += 1;
+            }
+            if !rem.is_empty() {
                 let mut byte = 0u8;
-                for k in 0..8 {
-                    let x = bx * 8 + k;
-                    if x < self.width && self.get(x, y) {
+                for (k, &p) in rem.iter().enumerate() {
+                    if p != 0 {
                         byte |= 1 << (7 - k);
                     }
                 }
-                out.push(byte);
+                dst[bx] = byte;
             }
         }
         out
@@ -88,10 +105,9 @@ impl StripBitmap {
     #[must_use]
     pub fn to_pgm(&self) -> alloc::vec::Vec<u8> {
         let header = alloc::format!("P5\n{} {}\n255\n", self.width, self.height);
-        let mut out = header.into_bytes();
-        for &p in &self.pixels {
-            out.push(if p != 0 { 0 } else { 255 });
-        }
+        let mut out = alloc::vec::Vec::with_capacity(header.len() + self.pixels.len());
+        out.extend_from_slice(header.as_bytes());
+        out.extend(self.pixels.iter().map(|&p| if p != 0 { 0u8 } else { 255u8 }));
         out
     }
 
@@ -117,15 +133,30 @@ impl StripBitmap {
         out[58..62].copy_from_slice(&[0, 0, 0, 0]);
         for y in 0..self.height {
             let src_y = self.height - 1 - y; // BMP rows are bottom-up.
-            for bx in 0..row_bytes {
+            let row = &self.pixels[src_y * self.width..(src_y + 1) * self.width];
+            let dst = &mut out[62 + y * row_bytes..62 + (y + 1) * row_bytes];
+            let (chunks, rem) = row.as_chunks::<8>();
+            let mut bx = 0usize;
+            for chunk in chunks {
+                // Palette index 0 = white (bit 1), 1 = black (bit 0).
+                dst[bx] = (((chunk[0] == 0) as u8) << 7)
+                    | (((chunk[1] == 0) as u8) << 6)
+                    | (((chunk[2] == 0) as u8) << 5)
+                    | (((chunk[3] == 0) as u8) << 4)
+                    | (((chunk[4] == 0) as u8) << 3)
+                    | (((chunk[5] == 0) as u8) << 2)
+                    | (((chunk[6] == 0) as u8) << 1)
+                    | ((chunk[7] == 0) as u8);
+                bx += 1;
+            }
+            if !rem.is_empty() {
                 let mut byte = 0u8;
-                for k in 0..8 {
-                    let x = bx * 8 + k;
-                    if x < self.width && !self.get(x, src_y) {
+                for (k, &p) in rem.iter().enumerate() {
+                    if p == 0 {
                         byte |= 1 << (7 - k);
                     }
                 }
-                out[62 + y * row_bytes + bx] = byte;
+                dst[bx] = byte;
             }
         }
         out
@@ -134,37 +165,21 @@ impl StripBitmap {
 
 /// Pixels per module (dot cell) at `dpi` (at least 1).
 #[must_use]
-pub fn module_px(dpi: u32) -> usize {
-    core::cmp::max(1, (dpi / MODULES_PER_INCH) as usize)
+pub const fn module_px(dpi: u32) -> usize {
+    let px = (dpi / MODULES_PER_INCH) as usize;
+    if px < 1 { 1 } else { px }
 }
 
-/// Draw a 5×5 rounded Olympus DotCode anchor mark with top-left cell `(ox, oy)`.
+/// Draw a 5×5 rounded Olympus DotCode anchor mark on the 1x module grid.
 #[cfg(feature = "alloc")]
-fn draw_anchor(
-    ox: usize,
-    oy: usize,
-    scale: usize,
-    width: usize,
-    pixels: &mut [u8],
-) {
-    for dy in 0..ANCHOR_SIZE {
-        for dx in 0..ANCHOR_SIZE {
-            // 5x5 rounded square: omit the 4 extreme corners.
-            let is_corner = (dx == 0 || dx == 4) && (dy == 0 || dy == 4);
-            if !is_corner {
-                set_cell(ox + dx, oy + dy, scale, width, pixels);
-            }
-        }
-    }
-}
-
-#[cfg(feature = "alloc")]
-fn set_cell(cx: usize, cy: usize, scale: usize, width: usize, pixels: &mut [u8]) {
-    for sy in 0..scale {
-        let row = (cy * scale + sy) * width + cx * scale;
-        for sx in 0..scale {
-            pixels[row + sx] = 1;
-        }
+fn draw_anchor_1x(ox: usize, oy: usize, cols: usize, grid: &mut [u8]) {
+    // Row 0 and row 4: omit extreme corners (columns 1..4).
+    grid[oy * cols + ox + 1..oy * cols + ox + 4].fill(1);
+    grid[(oy + 4) * cols + ox + 1..(oy + 4) * cols + ox + 4].fill(1);
+    // Rows 1..4: all 5 columns.
+    for dy in 1..4 {
+        let base = (oy + dy) * cols + ox;
+        grid[base..base + ANCHOR_SIZE].fill(1);
     }
 }
 
@@ -183,39 +198,33 @@ pub fn render_strip(raw: &[u8], dpi: u32) -> Result<StripBitmap> {
     let scale = module_px(dpi);
     let cols = phys_blocks * BLOCK_COLS + ANCHOR_SIZE + QUIET_ZONE * 2;
     let rows = STRIP_ROWS + QUIET_ZONE * 2;
-    let width = cols * scale;
-    let height = rows * scale;
-    let mut pixels = alloc::vec![0u8; width * height];
 
+    // Step 1: Render 1x module grid (fits in L1/L2 cache: <= 48 KiB).
+    let mut grid = alloc::vec![0u8; cols * rows];
     for pb in 0..phys_blocks {
         let bx = QUIET_ZONE + pb * BLOCK_COLS;
-        // Top and bottom 5x5 rounded anchors on the left edge of each block.
-        draw_anchor(bx, QUIET_ZONE, scale, width, &mut pixels);
-        draw_anchor(bx, QUIET_ZONE + STRIP_ROWS - ANCHOR_SIZE, scale, width, &mut pixels);
+        draw_anchor_1x(bx, QUIET_ZONE, cols, &mut grid);
+        draw_anchor_1x(bx, QUIET_ZONE + STRIP_ROWS - ANCHOR_SIZE, cols, &mut grid);
 
         // Sync dot (row 7) and 16-bit block address bar (rows 10..26) in col 2.
-        set_cell(bx + 2, QUIET_ZONE + 7, scale, width, &mut pixels);
+        grid[(QUIET_ZONE + 7) * cols + bx + 2] = 1;
         let addr_word = ((pb as u16) + 1) ^ 0xA500;
         for bit in 0..16 {
             if (addr_word >> (15 - bit)) & 1 == 1 {
-                set_cell(bx + 2, QUIET_ZONE + 10 + bit, scale, width, &mut pixels);
+                grid[(QUIET_ZONE + 10 + bit) * cols + bx + 2] = 1;
             }
         }
 
         // 26 data columns x 40 rows = 104 bytes x 10 modulated bits.
         let blk = &raw[pb * PHYSICAL_BLOCK_LEN..(pb + 1) * PHYSICAL_BLOCK_LEN];
         for col in 0..26 {
+            let cx = bx + 7 + col;
             for b_idx in 0..4 {
                 let sym = modulate(blk[col * 4 + b_idx]);
+                let base_y = QUIET_ZONE + b_idx * 10;
                 for k in 0..10 {
                     if (sym >> (9 - k)) & 1 == 1 {
-                        set_cell(
-                            bx + 7 + col,
-                            QUIET_ZONE + b_idx * 10 + k,
-                            scale,
-                            width,
-                            &mut pixels,
-                        );
+                        grid[(base_y + k) * cols + cx] = 1;
                     }
                 }
             }
@@ -224,8 +233,59 @@ pub fn render_strip(raw: &[u8], dpi: u32) -> Result<StripBitmap> {
 
     // Closing right-edge anchor pair.
     let end_x = QUIET_ZONE + phys_blocks * BLOCK_COLS;
-    draw_anchor(end_x, QUIET_ZONE, scale, width, &mut pixels);
-    draw_anchor(end_x, QUIET_ZONE + STRIP_ROWS - ANCHOR_SIZE, scale, width, &mut pixels);
+    draw_anchor_1x(end_x, QUIET_ZONE, cols, &mut grid);
+    draw_anchor_1x(end_x, QUIET_ZONE + STRIP_ROWS - ANCHOR_SIZE, cols, &mut grid);
+
+    // Step 2: Expand 1x module grid to `scale` x `scale` pixels sequentially.
+    let width = cols * scale;
+    let height = rows * scale;
+    let mut pixels = alloc::vec![0u8; width * height];
+    for r in 0..rows {
+        let src_row = &grid[r * cols..(r + 1) * cols];
+        let first_dst_start = r * scale * width;
+        {
+            let dst_row = &mut pixels[first_dst_start..first_dst_start + width];
+            match scale {
+                2 => {
+                    for (c, &p) in src_row.iter().enumerate() {
+                        if p != 0 {
+                            let x = c * 2;
+                            dst_row[x] = 1;
+                            dst_row[x + 1] = 1;
+                        }
+                    }
+                }
+                4 => {
+                    for (c, &p) in src_row.iter().enumerate() {
+                        if p != 0 {
+                            let x = c * 4;
+                            dst_row[x..x + 4].fill(1);
+                        }
+                    }
+                }
+                8 => {
+                    for (c, &p) in src_row.iter().enumerate() {
+                        if p != 0 {
+                            let x = c * 8;
+                            dst_row[x..x + 8].fill(1);
+                        }
+                    }
+                }
+                _ => {
+                    for (c, &p) in src_row.iter().enumerate() {
+                        if p != 0 {
+                            dst_row[c * scale..(c + 1) * scale].fill(1);
+                        }
+                    }
+                }
+            }
+        }
+        // Duplicate the expanded scanline `scale - 1` times.
+        for sy in 1..scale {
+            let dst_start = (r * scale + sy) * width;
+            pixels.copy_within(first_dst_start..first_dst_start + width, dst_start);
+        }
+    }
 
     Ok(StripBitmap { width, height, pixels })
 }
