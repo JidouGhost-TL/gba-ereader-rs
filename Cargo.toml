@@ -1,0 +1,28 @@
+[package]
+name = "gba-ereader"
+version = "0.1.0"
+edition = "2021"
+authors = ["The gbakit Authors"]
+description = "Pure Rust, zero-dependency Nintendo GBA e-Reader dot-code toolkit: vpk0 codec, GF(256) Reed-Solomon ECC, 8-to-10-bit optical modulation, .raw/.bin strip formats, and printable strip renderer"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jidoughost-tl/gba-ereader-rs"
+keywords = ["gba", "e-reader", "dot-code", "reed-solomon", "vpk0"]
+categories = ["embedded", "no-std", "encoding"]
+
+[dependencies]
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dev-dependencies]
+
+[[test]]
+name = "golden_tests"
+required-features = ["alloc"]
+
+[[bench]]
+name = "bench_ereader"
+harness = false
