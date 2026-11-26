@@ -146,6 +146,10 @@ strip round-trips, and printable DotCode bitmap rendering:
 | `.bin` → `.raw` / `.raw` → `.bin` (short & long strips) | ~434 MB/s / ~277 MB/s |
 | `render_strip` (long strip, 600 DPI pixels) | ~14.0 GB/s |
 
+## Community & Support
+
+Come discuss the wonders of GBA RE, modding, etc. — also the best way to report issues or bugs, or ask for help on your own project: https://discord.gg/khwxFSVNrS
+
 ## License
 
 Licensed under either of:
